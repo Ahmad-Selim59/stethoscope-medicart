@@ -1,0 +1,69 @@
+{
+  "format": 1,
+  "restore": {
+    "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\MinttiSDK.csproj": {}
+  },
+  "projects": {
+    "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\MinttiSDK.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\MinttiSDK.csproj",
+        "projectName": "MinttiSDK",
+        "projectPath": "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\MinttiSDK.csproj",
+        "packagesPath": "C:\\Users\\ws13275841808\\.nuget\\packages\\",
+        "outputPath": "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\obj\\",
+        "projectStyle": "PackageReference",
+        "skipContentFileWrite": true,
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
+        "configFilePaths": [
+          "C:\\Users\\ws13275841808\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net48"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net48": {
+            "projectReferences": {}
+          }
+        }
+      },
+      "frameworks": {
+        "net48": {
+          "dependencies": {
+            "Microsoft.Windows.SDK.Contracts": {
+              "target": "Package",
+              "version": "[10.0.22621.755, )"
+            },
+            "NAudio": {
+              "target": "Package",
+              "version": "[1.9.0, )"
+            },
+            "SunnyUI": {
+              "target": "Package",
+              "version": "[3.3.9, )"
+            }
+          }
+        }
+      },
+      "runtimes": {
+        "win": {
+          "#import": []
+        },
+        "win-x64": {
+          "#import": []
+        },
+        "win-x86": {
+          "#import": []
+        }
+      }
+    }
+  }
+}

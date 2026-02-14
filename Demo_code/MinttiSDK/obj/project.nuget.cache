@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "u3aSolqUxEoEWDdHC7u4tKZjavgJ/yrKQ4mrgyIGS9oSadrJr2SmMI4OqkaR6SXKK9iq2cdobfucugIXQOjt8A==",
+  "success": true,
+  "projectFilePath": "D:\\windows_sdk\\smartho_win10sdk_2.0.6\\Demo_code\\MinttiSDK\\MinttiSDK.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\microsoft.windows.sdk.contracts\\10.0.22621.755\\microsoft.windows.sdk.contracts.10.0.22621.755.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\naudio\\1.9.0\\naudio.1.9.0.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\sunnyui\\3.3.9\\sunnyui.3.3.9.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\sunnyui.common\\3.3.9\\sunnyui.common.3.3.9.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\system.runtime.interopservices.windowsruntime\\4.3.0\\system.runtime.interopservices.windowsruntime.4.3.0.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\system.runtime.windowsruntime\\4.6.0\\system.runtime.windowsruntime.4.6.0.nupkg.sha512",
+    "C:\\Users\\ws13275841808\\.nuget\\packages\\system.runtime.windowsruntime.ui.xaml\\4.6.0\\system.runtime.windowsruntime.ui.xaml.4.6.0.nupkg.sha512"
+  ],
+  "logs": []
+}

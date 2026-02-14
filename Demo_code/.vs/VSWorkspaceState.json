@@ -1,0 +1,12 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\MinttiSDK",
+    "\\mintti_sdk",
+    "\\mintti_sdk\\ble",
+    "\\mintti_sdk\\ble\\constants",
+    "\\mintti_sdk\\ble\\manager"
+  ],
+  "SelectedNode": "\\mintti_sdk\\ble\\SmarthoAlgo.cs",
+  "PreviewInSolutionExplorer": false
+}
