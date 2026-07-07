@@ -13,7 +13,7 @@ namespace MinttiCLI
 {
     class Program
     {
-        private static readonly AutoResetEvent _waitHandle = new AutoResetEvent(false);
+        private static int _exitCode;
 
         [STAThread]
         static int Main(string[] args)
@@ -27,35 +27,41 @@ namespace MinttiCLI
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // The Mintti BLE SDK uses WinRT callbacks that require an STA message pump.
-            using (var appContext = new ApplicationContext())
-            {
-                var pumpReady = new ManualResetEventSlim(false);
-                var pumpThread = new Thread(() =>
-                {
-                    pumpReady.Set();
-                    Application.Run(appContext);
-                });
-                pumpThread.SetApartmentState(ApartmentState.STA);
-                pumpThread.IsBackground = true;
-                pumpThread.Start();
-                pumpReady.Wait();
+            // The Mintti BLE SDK marshals its WinRT callbacks onto the WinForms
+            // SynchronizationContext captured at init time. We must therefore install
+            // that context on THIS STA thread and run all SDK work while a message
+            // pump is active on the same thread (mirroring how the GUI demo works).
+            var syncContext = new WindowsFormsSynchronizationContext();
+            SynchronizationContext.SetSynchronizationContext(syncContext);
 
+            syncContext.Post(async _ =>
+            {
                 try
                 {
-                    return RunAsync(args).GetAwaiter().GetResult();
+                    _exitCode = await RunAsync(args);
                 }
                 catch (Exception ex)
                 {
                     PrintError("INTERNAL_ERROR", ex.Message);
-                    return 1;
+                    Console.Error.WriteLine("=== FULL EXCEPTION (debug) ===");
+                    Console.Error.WriteLine(ex.ToString());
+                    var inner = ex.InnerException;
+                    while (inner != null)
+                    {
+                        Console.Error.WriteLine("--- Inner Exception ---");
+                        Console.Error.WriteLine(inner.ToString());
+                        inner = inner.InnerException;
+                    }
+                    _exitCode = 1;
                 }
                 finally
                 {
-                    appContext.ExitThread();
-                    pumpThread.Join(TimeSpan.FromSeconds(2));
+                    Application.ExitThread();
                 }
-            }
+            }, null);
+
+            Application.Run();
+            return _exitCode;
         }
 
         static async Task<int> RunAsync(string[] args)
@@ -190,7 +196,7 @@ namespace MinttiCLI
                 return 1;
             }
 
-            bool connected = false;
+            var connectResult = new TaskCompletionSource<bool>();
 
             ble.MessageChanged += (type, message, data) =>
             {
@@ -198,13 +204,11 @@ namespace MinttiCLI
                 {
                     if (message == MinttiConstants.CONNECTED)
                     {
-                        connected = true;
-                        _waitHandle.Set();
+                        connectResult.TrySetResult(true);
                     }
                     else if (message == MinttiConstants.CONNECTION_FAILED || message == MinttiConstants.DISCONNECT)
                     {
-                        connected = false;
-                        _waitHandle.Set();
+                        connectResult.TrySetResult(false);
                     }
                     Console.WriteLine($"DATA:STATUS type=connection message=\"{message}\"");
                 }
@@ -223,7 +227,10 @@ namespace MinttiCLI
 
             ble.ConnectByMac(mac);
 
-            _waitHandle.WaitOne(10000);
+            // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
+            var timeout = Task.Delay(10000);
+            var finished = await Task.WhenAny(connectResult.Task, timeout);
+            bool connected = finished == connectResult.Task && connectResult.Task.Result;
 
             if (!connected)
             {
