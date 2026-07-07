@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using mintti_sdk.ble.bean;
 using mintti_sdk.ble.constants;
 using mintti_sdk.ble.manager;
@@ -12,50 +13,74 @@ namespace MinttiCLI
 {
     class Program
     {
-        private static bool _isScanning = false;
-        private static bool _isConnected = false;
-        private static string _targetMac = null;
-        private static AutoResetEvent _waitHandle = new AutoResetEvent(false);
+        private static readonly AutoResetEvent _waitHandle = new AutoResetEvent(false);
 
-        static async Task Main(string[] args)
+        [STAThread]
+        static int Main(string[] args)
         {
             if (args.Length == 0 || args.Contains("-help") || args.Contains("--help"))
             {
                 PrintHelp();
-                return;
+                return 0;
             }
 
-            try
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            // The Mintti BLE SDK uses WinRT callbacks that require an STA message pump.
+            using (var appContext = new ApplicationContext())
             {
-                // Initialize SDK
-                var ble = MinttiBle.GetInstance;
-                
-                if (args.Contains("-list"))
+                var pumpReady = new ManualResetEventSlim(false);
+                var pumpThread = new Thread(() =>
                 {
-                    await ListDevices(ble);
+                    pumpReady.Set();
+                    Application.Run(appContext);
+                });
+                pumpThread.SetApartmentState(ApartmentState.STA);
+                pumpThread.IsBackground = true;
+                pumpThread.Start();
+                pumpReady.Wait();
+
+                try
+                {
+                    return RunAsync(args).GetAwaiter().GetResult();
                 }
-                else if (args.Contains("-connect"))
+                catch (Exception ex)
                 {
-                    string mac = GetArgValue(args, "-mac");
-                    if (string.IsNullOrEmpty(mac))
-                    {
-                        PrintError("MISSING_MAC", "Please provide a MAC address using -mac");
-                        Environment.Exit(1);
-                    }
-                    await ConnectAndStream(ble, mac);
+                    PrintError("INTERNAL_ERROR", ex.Message);
+                    return 1;
                 }
-                else
+                finally
                 {
-                    PrintError("UNKNOWN_COMMAND", "Unknown command or missing arguments");
-                    PrintHelp();
-                    Environment.Exit(1);
+                    appContext.ExitThread();
+                    pumpThread.Join(TimeSpan.FromSeconds(2));
                 }
             }
-            catch (Exception ex)
+        }
+
+        static async Task<int> RunAsync(string[] args)
+        {
+            var ble = MinttiBle.GetInstance;
+
+            if (args.Contains("-list"))
             {
-                PrintError("INTERNAL_ERROR", ex.Message);
-                Environment.Exit(1);
+                return await ListDevices(ble);
             }
+
+            if (args.Contains("-connect"))
+            {
+                string mac = GetArgValue(args, "-mac");
+                if (string.IsNullOrEmpty(mac))
+                {
+                    PrintError("MISSING_MAC", "Please provide a MAC address using -mac");
+                    return 1;
+                }
+                return await ConnectAndStream(ble, mac);
+            }
+
+            PrintError("UNKNOWN_COMMAND", "Unknown command or missing arguments");
+            PrintHelp();
+            return 1;
         }
 
         static void PrintHelp()
@@ -103,11 +128,41 @@ namespace MinttiCLI
             return null;
         }
 
-        static async Task ListDevices(MinttiBle ble)
+        static async Task<bool> CheckBleAsync(MinttiBle ble)
         {
+            bool isEnable = await ble.GetBleEnableAsync();
+            if (!isEnable)
+            {
+                PrintError("BLE_UNAVAILABLE", "Bluetooth is not available on this system");
+                return false;
+            }
+
+            bool isOpen = await ble.IsOpenBleAsync();
+            if (!isOpen)
+            {
+                PrintError("BLE_DISABLED", "Bluetooth is turned off. Please enable Bluetooth first.");
+                return false;
+            }
+
+            return true;
+        }
+
+        static async Task<int> ListDevices(MinttiBle ble)
+        {
+            if (!await CheckBleAsync(ble))
+            {
+                return 1;
+            }
+
             List<DeviceInfo> devices = new List<DeviceInfo>();
-            
-            ble.DeviceWatcherChanged += (device) => {
+
+            ble.DeviceWatcherChanged += (device) =>
+            {
+                if (device == null || string.IsNullOrEmpty(device.Mac))
+                {
+                    return;
+                }
+
                 if (!devices.Any(d => d.Mac == device.Mac))
                 {
                     devices.Add(device);
@@ -125,13 +180,20 @@ namespace MinttiCLI
                 Console.WriteLine($"DATA:ITEM index={i} name=\"{devices[i].Name}\" mac=\"{devices[i].Mac}\"");
             }
             PrintOk("list");
+            return 0;
         }
 
-        static async Task ConnectAndStream(MinttiBle ble, string mac)
+        static async Task<int> ConnectAndStream(MinttiBle ble, string mac)
         {
+            if (!await CheckBleAsync(ble))
+            {
+                return 1;
+            }
+
             bool connected = false;
-            
-            ble.MessageChanged += (type, message, data) => {
+
+            ble.MessageChanged += (type, message, data) =>
+            {
                 if (type == MsgType.ConnectStatus)
                 {
                     if (message == MinttiConstants.CONNECTED)
@@ -148,36 +210,35 @@ namespace MinttiCLI
                 }
             };
 
-            ble.DataCallback += (data) => {
-                // Stream data as JSON array of shorts
+            ble.DataCallback += (data) =>
+            {
                 string jsonData = JsonConvert.SerializeObject(data);
                 Console.WriteLine($"DATA:STREAM type=audio data={jsonData}");
             };
 
-            ble.HeartRateCallback += (hr) => {
+            ble.HeartRateCallback += (hr) =>
+            {
                 Console.WriteLine($"DATA:STREAM type=heartrate value={hr}");
             };
 
             ble.ConnectByMac(mac);
-            
-            // Wait for connection result
+
             _waitHandle.WaitOne(10000);
 
             if (!connected)
             {
                 PrintError("CONNECT_FAILED", "Failed to connect to device " + mac);
-                return;
+                return 1;
             }
 
             PrintOk("connect", $"mac={mac}");
-            
-            // Start measuring
+
             ble.StartMeasure();
             Console.WriteLine("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
-            // Keep alive until interrupted
             var tcs = new TaskCompletionSource<bool>();
-            Console.CancelKeyPress += (s, e) => {
+            Console.CancelKeyPress += (s, e) =>
+            {
                 e.Cancel = true;
                 tcs.SetResult(true);
             };
@@ -187,6 +248,7 @@ namespace MinttiCLI
             ble.StopMeasure();
             ble.Dispose();
             PrintOk("stop");
+            return 0;
         }
     }
 }
