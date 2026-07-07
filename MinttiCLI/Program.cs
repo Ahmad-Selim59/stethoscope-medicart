@@ -62,10 +62,23 @@ namespace MinttiCLI
         {
             Console.WriteLine("Mintti Stethoscope CLI Tool");
             Console.WriteLine("Usage:");
-            Console.WriteLine("  -list              List available stethoscope devices");
-            Console.WriteLine("  -connect -mac MAC  Connect to a device and stream data to stdout");
-            Console.WriteLine("  -help              Show this help menu");
-            Console.WriteLine("\nOutput format: DATA:key=value");
+            Console.WriteLine("  mintti_cli.exe [options]");
+            Console.WriteLine();
+            Console.WriteLine("Options:");
+            Console.WriteLine("  -list              Scan for available stethoscope devices (5 seconds).");
+            Console.WriteLine("  -connect -mac MAC  Connect to a device and stream data to stdout.");
+            Console.WriteLine("  -help              Show this help message.");
+            Console.WriteLine();
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  mintti_cli.exe -list");
+            Console.WriteLine("  mintti_cli.exe -connect -mac AA:BB:CC:DD:EE:FF");
+            Console.WriteLine();
+            Console.WriteLine("Data Format (Stdout):");
+            Console.WriteLine("  List:        DATA:ITEM index={n} name=\"{name}\" mac=\"{mac}\"");
+            Console.WriteLine("  Stream:      DATA:STREAM type=audio data=[...]");
+            Console.WriteLine("  Heart Rate:  DATA:STREAM type=heartrate value={int}");
+            Console.WriteLine("  Status:      DATA:STATUS message=\"...\"");
+            Console.WriteLine("  Error:       DATA:ERROR code={code} message=\"...\"");
         }
 
         static void PrintError(string code, string message)
