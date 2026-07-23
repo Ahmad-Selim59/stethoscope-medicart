@@ -174,7 +174,7 @@ namespace MinttiCLI
         // completes ("Collection was modified"), leaking the BluetoothLEDevice + GATT session.
         // That leak is what forces a Bluetooth off/on between runs. Awaiting a background
         // Dispose lets it complete cleanly and actually release the radio.
-        static async Task ShutdownSdkAsync(int timeoutMs = 5000)
+        static async Task ShutdownSdkAsync(int timeoutMs = 8000)
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
@@ -218,10 +218,18 @@ namespace MinttiCLI
                 return 0;
             }
 
-            // Silence the native SDK's printf spam on the console (see RedirectNativeStdIoToNul).
-            // Must happen AFTER StartOutputWriter captured the real handles, and BEFORE the SDK
-            // (and its native MinttiAlgo.dll) is touched.
-            RedirectNativeStdIoToNul();
+            // Optionally silence the native SDK's printf spam (see RedirectNativeStdIoToNul).
+            // IMPORTANT: pointing the native std handles at NUL appears to break MinttiAlgo.dll's
+            // audio pipeline (it stops producing decoded packets), so we only do it when it's
+            // actually needed -- an INTERACTIVE console, where the native printf would otherwise
+            // stall the BLE thread. When stdout is piped (the real medicart integration), the
+            // pipe is fast, there's no stall, and we leave the native lib completely untouched so
+            // audio flows. "-noredirect" force-disables it for debugging.
+            bool pipedOutput = Console.IsOutputRedirected;
+            if (!pipedOutput && !args.Contains("-noredirect"))
+            {
+                RedirectNativeStdIoToNul();
+            }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -437,6 +445,7 @@ namespace MinttiCLI
             Emit("  -list              Scan for available stethoscope devices (5 seconds).");
             Emit("  -connect -mac MAC  Connect to a device and stream data to stdout.");
             Emit("  -warmup MS         Delay (ms) after connect before streaming (default 1500).");
+            Emit("  -noredirect        Do not redirect native SDK stdout (debugging).");
             Emit("  -verbose, -v       Print SDK diagnostics to stderr (for debugging).");
             Emit("  -help              Show this help message.");
             Emit("");
