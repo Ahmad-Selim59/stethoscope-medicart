@@ -28,40 +28,55 @@ namespace MinttiCLI
             Application.SetCompatibleTextRenderingDefault(false);
 
             // The Mintti BLE SDK marshals its WinRT callbacks onto the WinForms
-            // SynchronizationContext captured at init time. We must therefore install
-            // that context on THIS STA thread and run all SDK work while a message
-            // pump is active on the same thread (mirroring how the GUI demo works).
-            var syncContext = new WindowsFormsSynchronizationContext();
-            SynchronizationContext.SetSynchronizationContext(syncContext);
-
-            syncContext.Post(async _ =>
+            // SynchronizationContext that is auto-installed when a WinForms control
+            // handle is created. A bare console thread does not have this, which makes
+            // the SDK throw a NullReferenceException inside StartBleDeviceWatcher().
+            //
+            // To reproduce the exact environment the working GUI demo runs in, we
+            // create a real (but never shown) control so its handle creation installs
+            // the WinForms sync context, then run all SDK work on that pumped thread.
+            using (var context = new ApplicationContext())
+            using (var marshaler = new Control())
             {
-                try
-                {
-                    _exitCode = await RunAsync(args);
-                }
-                catch (Exception ex)
-                {
-                    PrintError("INTERNAL_ERROR", ex.Message);
-                    Console.Error.WriteLine("=== FULL EXCEPTION (debug) ===");
-                    Console.Error.WriteLine(ex.ToString());
-                    var inner = ex.InnerException;
-                    while (inner != null)
-                    {
-                        Console.Error.WriteLine("--- Inner Exception ---");
-                        Console.Error.WriteLine(inner.ToString());
-                        inner = inner.InnerException;
-                    }
-                    _exitCode = 1;
-                }
-                finally
-                {
-                    Application.ExitThread();
-                }
-            }, null);
+                // Forcing handle creation installs the WindowsFormsSynchronizationContext
+                // on this STA thread (same as the GUI does via InitializeComponent).
+                var _ = marshaler.Handle;
 
-            Application.Run();
+                marshaler.BeginInvoke((Action)(async () =>
+                {
+                    try
+                    {
+                        _exitCode = await RunAsync(args);
+                    }
+                    catch (Exception ex)
+                    {
+                        DumpException(ex);
+                        _exitCode = 1;
+                    }
+                    finally
+                    {
+                        context.ExitThread();
+                    }
+                }));
+
+                Application.Run(context);
+            }
+
             return _exitCode;
+        }
+
+        static void DumpException(Exception ex)
+        {
+            PrintError("INTERNAL_ERROR", ex.Message);
+            Console.Error.WriteLine("=== FULL EXCEPTION (debug) ===");
+            Console.Error.WriteLine(ex.ToString());
+            var inner = ex.InnerException;
+            while (inner != null)
+            {
+                Console.Error.WriteLine("--- Inner Exception ---");
+                Console.Error.WriteLine(inner.ToString());
+                inner = inner.InnerException;
+            }
         }
 
         static async Task<int> RunAsync(string[] args)
