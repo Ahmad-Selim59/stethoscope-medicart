@@ -286,22 +286,31 @@ namespace MinttiCLI
 
         // A real WinForms Form that is never visible. Creating it gives the SDK the exact
         // runtime environment it expects (message pump, sync context, an active Form).
+        //
+        // IMPORTANT: it is deliberately NOT minimized. Windows throttles message/COM dispatch
+        // for minimized windows, which slows the STA pump that delivers WinRT BLE callbacks --
+        // and the SDK's heavy first-frame FFTW init already blocks that pump long enough to risk
+        // a supervision-timeout disconnect. We instead keep the window "shown" (so the SDK sees
+        // an active form) but fully invisible: zero opacity, no taskbar entry, and parked far
+        // off-screen at 1x1. This matches the GUI's un-throttled, normal-window environment.
         private sealed class HiddenForm : Form
         {
             public HiddenForm()
             {
                 Opacity = 0;
                 ShowInTaskbar = false;
-                WindowState = FormWindowState.Minimized;
                 FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.Manual;
+                Location = new System.Drawing.Point(-32000, -32000);
+                Size = new System.Drawing.Size(1, 1);
                 Load += HiddenForm_Load;
             }
 
             private async void HiddenForm_Load(object sender, EventArgs e)
             {
-                // Keep it hidden even though Load requires the form to be "shown".
-                Hide();
-
+                // Do NOT Hide() -- a hidden (Visible=false) or minimized window gets its message
+                // pump throttled by Windows. Zero opacity + off-screen keeps it invisible while
+                // the pump runs at full speed for the BLE callbacks.
                 try
                 {
                     _exitCode = await RunAsync(_args);
