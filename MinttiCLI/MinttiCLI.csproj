@@ -22,4 +22,22 @@
     <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.22621.755" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
+
+  <!--
+    MinttiAlgo.dll is a NATIVE (unmanaged) DLL the SDK loads via P/Invoke at runtime
+    (SmarthoAlgo / StartMeasure). It is not a .NET reference, so it must be copied next
+    to the exe. We copy it from whichever SDK bin folder it exists in.
+  -->
+  <ItemGroup>
+    <None Include="..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll"
+          Condition="Exists('..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll')">
+      <Link>MinttiAlgo.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\Demo_code\MinttiSDK\bin\x64\Release\MinttiAlgo.dll"
+          Condition="!Exists('..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll') And Exists('..\Demo_code\MinttiSDK\bin\x64\Release\MinttiAlgo.dll')">
+      <Link>MinttiAlgo.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 </Project>
