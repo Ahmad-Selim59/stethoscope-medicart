@@ -10,15 +10,16 @@
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
 
-    <!-- Folder that holds the SDK's managed + native DLLs (mintti_sdk.dll, MinttiAlgo.dll,
-         and any sibling native dependencies). Everything in here is copied next to the exe. -->
-    <SdkBinDir>$(MSBuildProjectDirectory)\..\Demo_code\MinttiSDK\bin\x64\Debug</SdkBinDir>
-    <SdkBinDirRelease>$(MSBuildProjectDirectory)\..\Demo_code\MinttiSDK\bin\x64\Release</SdkBinDirRelease>
+    <!-- Canonical SDK folder holding the CORRECT, matching set of DLLs: the managed
+         mintti_sdk.dll (43,008-byte build that exposes GetBleEnableAsync, DataLoseCallback,
+         etc.) AND its native companions (MinttiAlgo.dll + any sibling native deps).
+         Both the managed reference and the native copy come from here so versions match. -->
+    <SdkBinDir>$(MSBuildProjectDirectory)\..\smartho_sdk\MinttleDemo</SdkBinDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="mintti_sdk, Version=1.0.0.0, Culture=neutral, processorArchitecture=AMD64">
-      <HintPath>..\Demo_code\MinttiSDK\bin\x64\Debug\mintti_sdk.dll</HintPath>
+      <HintPath>..\smartho_sdk\MinttleDemo\mintti_sdk.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="System.Windows.Forms" />
@@ -35,8 +36,7 @@
     copied next to the exe along with any of their own sibling native dependencies.
 
     This target copies EVERY dll from the SDK bin folder into the build output after each
-    build, so you never have to copy them by hand. It prefers the Debug SDK bin, falling
-    back to the Release SDK bin if Debug doesn't exist.
+    build, so you never have to copy them by hand.
   -->
   <Target Name="CopySdkNativeDlls" AfterTargets="Build;Publish">
     <ItemGroup>
@@ -46,12 +46,9 @@
       <SdkDlls Include="$(SdkBinDir)\*.dll"
                Exclude="$(SdkBinDir)\mintti_sdk.dll"
                Condition="Exists('$(SdkBinDir)')" />
-      <SdkDlls Include="$(SdkBinDirRelease)\*.dll"
-               Exclude="$(SdkBinDirRelease)\mintti_sdk.dll"
-               Condition="!Exists('$(SdkBinDir)') And Exists('$(SdkBinDirRelease)')" />
     </ItemGroup>
 
-    <Warning Text="No SDK DLLs found in '$(SdkBinDir)' or '$(SdkBinDirRelease)'. MinttiAlgo.dll / mintti_sdk.dll will be missing at runtime."
+    <Warning Text="No SDK DLLs found in '$(SdkBinDir)'. MinttiAlgo.dll and other native deps will be missing at runtime."
              Condition="'@(SdkDlls)' == ''" />
 
     <Copy SourceFiles="@(SdkDlls)"
