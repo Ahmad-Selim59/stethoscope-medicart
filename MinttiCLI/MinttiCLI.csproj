@@ -3,11 +3,17 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>MinttiCLI</RootNamespace>
-    <AssemblyName>mintti_cli</AssemblyName>
+    <!-- Output is MinttiCLI.exe (and MinttiCLI.exe.config) so it matches what medicart launches. -->
+    <AssemblyName>MinttiCLI</AssemblyName>
     <Platforms>x64</Platforms>
     <Platform>x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
+
+    <!-- Folder that holds the SDK's managed + native DLLs (mintti_sdk.dll, MinttiAlgo.dll,
+         and any sibling native dependencies). Everything in here is copied next to the exe. -->
+    <SdkBinDir>$(MSBuildProjectDirectory)\..\Demo_code\MinttiSDK\bin\x64\Debug</SdkBinDir>
+    <SdkBinDirRelease>$(MSBuildProjectDirectory)\..\Demo_code\MinttiSDK\bin\x64\Release</SdkBinDirRelease>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,20 +30,30 @@
   </ItemGroup>
 
   <!--
-    MinttiAlgo.dll is a NATIVE (unmanaged) DLL the SDK loads via P/Invoke at runtime
-    (SmarthoAlgo / StartMeasure). It is not a .NET reference, so it must be copied next
-    to the exe. We copy it from whichever SDK bin folder it exists in.
+    The Mintti SDK P/Invokes native DLLs at runtime (e.g. MinttiAlgo.dll, called from
+    StartMeasure -> AlgoManager.initAlgo). These are NOT .NET references, so they must be
+    copied next to the exe along with any of their own sibling native dependencies.
+
+    This target copies EVERY dll from the SDK bin folder into the build output after each
+    build, so you never have to copy them by hand. It prefers the Debug SDK bin, falling
+    back to the Release SDK bin if Debug doesn't exist.
   -->
-  <ItemGroup>
-    <None Include="..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll"
-          Condition="Exists('..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll')">
-      <Link>MinttiAlgo.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\Demo_code\MinttiSDK\bin\x64\Release\MinttiAlgo.dll"
-          Condition="!Exists('..\Demo_code\MinttiSDK\bin\x64\Debug\MinttiAlgo.dll') And Exists('..\Demo_code\MinttiSDK\bin\x64\Release\MinttiAlgo.dll')">
-      <Link>MinttiAlgo.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
+  <Target Name="CopySdkNativeDlls" AfterTargets="Build;Publish">
+    <ItemGroup>
+      <SdkDlls Include="$(SdkBinDir)\*.dll" Condition="Exists('$(SdkBinDir)')" />
+      <SdkDlls Include="$(SdkBinDirRelease)\*.dll" Condition="!Exists('$(SdkBinDir)') And Exists('$(SdkBinDirRelease)')" />
+    </ItemGroup>
+
+    <Warning Text="No SDK DLLs found in '$(SdkBinDir)' or '$(SdkBinDirRelease)'. MinttiAlgo.dll / mintti_sdk.dll will be missing at runtime."
+             Condition="'@(SdkDlls)' == ''" />
+
+    <Copy SourceFiles="@(SdkDlls)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(SdkDlls)' != ''" />
+    <Copy SourceFiles="@(SdkDlls)"
+          DestinationFolder="$(OutputPath)"
+          SkipUnchangedFiles="true"
+          Condition="'@(SdkDlls)' != ''" />
+  </Target>
 </Project>
