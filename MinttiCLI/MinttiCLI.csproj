@@ -40,8 +40,15 @@
   -->
   <Target Name="CopySdkNativeDlls" AfterTargets="Build;Publish">
     <ItemGroup>
-      <SdkDlls Include="$(SdkBinDir)\*.dll" Condition="Exists('$(SdkBinDir)')" />
-      <SdkDlls Include="$(SdkBinDirRelease)\*.dll" Condition="!Exists('$(SdkBinDir)') And Exists('$(SdkBinDirRelease)')" />
+      <!-- Copy native/support DLLs (MinttiAlgo.dll etc.) but NOT mintti_sdk.dll: the
+           managed SDK assembly is supplied by the <Reference Private="true"> above, and
+           overwriting it here with a different version breaks compilation/runtime. -->
+      <SdkDlls Include="$(SdkBinDir)\*.dll"
+               Exclude="$(SdkBinDir)\mintti_sdk.dll"
+               Condition="Exists('$(SdkBinDir)')" />
+      <SdkDlls Include="$(SdkBinDirRelease)\*.dll"
+               Exclude="$(SdkBinDirRelease)\mintti_sdk.dll"
+               Condition="!Exists('$(SdkBinDir)') And Exists('$(SdkBinDirRelease)')" />
     </ItemGroup>
 
     <Warning Text="No SDK DLLs found in '$(SdkBinDir)' or '$(SdkBinDirRelease)'. MinttiAlgo.dll / mintti_sdk.dll will be missing at runtime."
