@@ -150,13 +150,22 @@ namespace MinttiCLI
                     }
                     catch { /* ignore */ }
 
+                    // Give the BLE stack time to actually send the disconnect PDU to the
+                    // device before we kill the process. Without this, Environment.Exit tears
+                    // the process down mid-disconnect, leaving the stethoscope half-connected
+                    // on its side. The next run then gets a stale, cached GATT handle from
+                    // Windows (symptom: "GattServices size=0" / immediate "Disconnect"),
+                    // which only a power-cycle clears. This settle delay is what lets repeated
+                    // connect/disconnect cycles work without power-cycling the device.
+                    Thread.Sleep(2000);
+
                     Close();
 
                     // Drain any queued stdout before we terminate.
                     FlushOutput();
 
-                    // Force the process to terminate immediately so no background SDK
-                    // thread keeps the Bluetooth adapter busy after we're done.
+                    // Force the process to terminate so no background SDK thread keeps the
+                    // Bluetooth adapter busy after we're done.
                     Environment.Exit(_exitCode);
                 }
             }
@@ -418,23 +427,38 @@ namespace MinttiCLI
             // evicts the SDK's freshly-discovered device object, after which ConnectByMac
             // has nothing to connect to and silently reports no status. So we connect first
             // and only stop the watcher once the connection is established.
-            _connectResult = new TaskCompletionSource<bool>();
-            ble.ConnectByMac(targetMac);
+            //
+            // Retry a few times WITHOUT disposing (disposing + re-wiring would double-
+            // subscribe the event handlers). A stale/half-open connection left by a previous
+            // run often fails on the first attempt but succeeds on a retry once Windows
+            // drops the cached connection.
+            bool connected = false;
+            const int maxAttempts = 3;
+            for (int attempt = 1; attempt <= maxAttempts && !connected; attempt++)
+            {
+                Console.Error.WriteLine($"[SDK] connect attempt {attempt}/{maxAttempts}");
+                _connectResult = new TaskCompletionSource<bool>();
+                ble.ConnectByMac(targetMac);
 
-            // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
-            var timeout = Task.Delay(20000);
-            var finished = await Task.WhenAny(_connectResult.Task, timeout);
-            bool connected = finished == _connectResult.Task && _connectResult.Task.Result;
+                // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
+                var finished = await Task.WhenAny(_connectResult.Task, Task.Delay(15000));
+                connected = finished == _connectResult.Task && _connectResult.Task.Result;
+
+                if (!connected && attempt < maxAttempts)
+                {
+                    Console.Error.WriteLine("[SDK] attempt failed, waiting before retry...");
+                    await Task.Delay(2500); // let the BLE stack drop the stale connection
+                }
+            }
 
             // Now that we're connected (or gave up), stop scanning.
             ble.StopBleDeviceWatcher();
 
             if (!connected)
             {
-                string reason = finished == _connectResult.Task
-                    ? "SDK reported connection failed/disconnected"
-                    : "timed out waiting for connection (no status from device)";
-                PrintError("CONNECT_FAILED", "Failed to connect to device " + targetMac + " - " + reason);
+                PrintError("CONNECT_FAILED",
+                    "Failed to connect to device " + targetMac +
+                    " after " + maxAttempts + " attempts. If this persists, power-cycle the stethoscope.");
                 return 1;
             }
 
