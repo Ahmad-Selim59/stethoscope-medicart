@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,8 +43,48 @@ namespace MinttiCLI
             new BlockingCollection<OutLine>(new ConcurrentQueue<OutLine>());
         private static Thread _outputThread;
 
+        // --- Win32 std-handle redirection ------------------------------------------------
+        // The native MinttiAlgo.dll writes debug text (?????, "fft:", "initAlgo2", ...) with
+        // C printf straight to the process's stdout/stderr. Those writes happen on the SDK's
+        // BLE/algo thread. In the vendor GUI there is no console attached, so they are free;
+        // in our console app they hit a live console synchronously and stall that thread long
+        // enough for the BLE link to drop the moment the algo starts. We point the process's
+        // std handles at NUL so native prints are discarded instantly. Our own DATA/diagnostic
+        // output is unaffected: the background writer already captured the REAL handles.
+        private const int STD_OUTPUT_HANDLE = -11;
+        private const int STD_ERROR_HANDLE = -12;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetStdHandle(int nStdHandle, IntPtr hHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateFileW(
+            string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+        private static void RedirectNativeStdIoToNul()
+        {
+            try
+            {
+                const uint GENERIC_WRITE = 0x40000000;
+                const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2;
+                const uint OPEN_EXISTING = 3;
+                IntPtr nul = CreateFileW("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                if (nul != IntPtr.Zero && nul.ToInt64() != -1)
+                {
+                    SetStdHandle(STD_OUTPUT_HANDLE, nul);
+                    SetStdHandle(STD_ERROR_HANDLE, nul);
+                }
+            }
+            catch { /* best-effort; harmless if it fails */ }
+        }
+
         static void StartOutputWriter()
         {
+            // Capture the REAL console/pipe handles for our own output BEFORE redirecting the
+            // process std handles to NUL (below, in Main). These writers keep working after
+            // the redirect because they hold the original handle values directly.
             var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)
             {
                 AutoFlush = false
@@ -134,6 +175,11 @@ namespace MinttiCLI
                 FlushOutput();
                 return 0;
             }
+
+            // Silence the native SDK's printf spam on the console (see RedirectNativeStdIoToNul).
+            // Must happen AFTER StartOutputWriter captured the real handles, and BEFORE the SDK
+            // (and its native MinttiAlgo.dll) is touched.
+            RedirectNativeStdIoToNul();
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -232,6 +278,11 @@ namespace MinttiCLI
         private static TaskCompletionSource<bool> _connectResult = new TaskCompletionSource<bool>();
         private static bool _streaming;
 
+        // Signalled when streaming should end: either the user pressed Ctrl+C, or the device
+        // dropped the link while streaming. Lets -connect exit cleanly on a mid-stream
+        // disconnect instead of hanging forever waiting for Ctrl+C.
+        private static TaskCompletionSource<bool> _streamEnded = new TaskCompletionSource<bool>();
+
         static async Task<int> RunAsync(string[] args)
         {
             // Verbose SDK diagnostics are OFF by default: synchronous logging on the SDK's
@@ -302,6 +353,12 @@ namespace MinttiCLI
                     else if (message == MinttiConstants.CONNECTION_FAILED || message == MinttiConstants.DISCONNECT)
                     {
                         _connectResult.TrySetResult(false);
+                        // If we were already streaming, the link just dropped -- end the stream
+                        // so the CLI shuts down cleanly instead of waiting for Ctrl+C.
+                        if (_streaming)
+                        {
+                            _streamEnded.TrySetResult(true);
+                        }
                     }
                     Emit($"DATA:STATUS type=connection message=\"{message}\"");
                 }
@@ -515,21 +572,40 @@ namespace MinttiCLI
             ble.StartMeasure();
             Emit("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
-            var tcs = new TaskCompletionSource<bool>();
             Console.CancelKeyPress += (s, e) =>
             {
                 e.Cancel = true;
                 // TrySetResult: a second Ctrl+C (or a race) must not throw
                 // "attempt to transition a task to a final state when it had already completed".
-                tcs.TrySetResult(true);
+                _streamEnded.TrySetResult(true);
+
+                // Watchdog: guarantee the process exits even if SDK teardown hangs. When the
+                // device has already dropped, StopMeasure()/Dispose() (and the native algo
+                // thread) can block indefinitely -- previously this left the CLI "stuck" until
+                // a second Ctrl+C. This thread force-exits a few seconds after Ctrl+C no matter
+                // what state the SDK is in.
+                var watchdog = new Thread(() =>
+                {
+                    Thread.Sleep(6000);
+                    try { FlushOutput(); } catch { }
+                    Environment.Exit(_exitCode);
+                })
+                {
+                    IsBackground = true,
+                    Name = "exit-watchdog"
+                };
+                watchdog.Start();
             };
 
-            await tcs.Task;
+            // Ends on Ctrl+C or on a mid-stream disconnect (set from the MessageChanged handler).
+            await _streamEnded.Task;
 
             _streaming = false;
             Emit("DATA:STATUS message=\"Stopping and disconnecting...\"");
-            ble.StopMeasure();
-            ble.Dispose();
+            // Guard both: if the device already disconnected, the SDK throws a
+            // NullReferenceException inside StopEnableNotifications (characteristic is null).
+            try { ble.StopMeasure(); } catch (Exception ex) { LogErr("StopMeasure failed: " + ex.Message); }
+            try { ble.Dispose(); } catch (Exception ex) { LogErr("Dispose failed: " + ex.Message); }
             PrintOk("stop");
             return 0;
         }
