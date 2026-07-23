@@ -14,6 +14,7 @@ namespace MinttiCLI
     class Program
     {
         private static int _exitCode;
+        private static string[] _args;
 
         [STAThread]
         static int Main(string[] args)
@@ -27,42 +28,49 @@ namespace MinttiCLI
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // The Mintti BLE SDK marshals its WinRT callbacks onto the WinForms
-            // SynchronizationContext that is auto-installed when a WinForms control
-            // handle is created. A bare console thread does not have this, which makes
-            // the SDK throw a NullReferenceException inside StartBleDeviceWatcher().
-            //
-            // To reproduce the exact environment the working GUI demo runs in, we
-            // create a real (but never shown) control so its handle creation installs
-            // the WinForms sync context, then run all SDK work on that pumped thread.
-            using (var context = new ApplicationContext())
-            using (var marshaler = new Control())
+            // The Mintti BLE SDK was written to run inside a WinForms Form: it relies on
+            // the WinForms message loop / SynchronizationContext and (in StartBleDeviceWatcher)
+            // on there being a real Form present. A console host lacks this and the SDK
+            // throws a NullReferenceException. To match the working GUI demo exactly, we
+            // host a real Form and run all SDK work from its Load event -- but the form is
+            // kept completely invisible so this stays a console tool.
+            _args = args;
+            Application.Run(new HiddenForm());
+            return _exitCode;
+        }
+
+        // A real WinForms Form that is never visible. Creating it gives the SDK the exact
+        // runtime environment it expects (message pump, sync context, an active Form).
+        private sealed class HiddenForm : Form
+        {
+            public HiddenForm()
             {
-                // Forcing handle creation installs the WindowsFormsSynchronizationContext
-                // on this STA thread (same as the GUI does via InitializeComponent).
-                var _ = marshaler.Handle;
-
-                marshaler.BeginInvoke((Action)(async () =>
-                {
-                    try
-                    {
-                        _exitCode = await RunAsync(args);
-                    }
-                    catch (Exception ex)
-                    {
-                        DumpException(ex);
-                        _exitCode = 1;
-                    }
-                    finally
-                    {
-                        context.ExitThread();
-                    }
-                }));
-
-                Application.Run(context);
+                Opacity = 0;
+                ShowInTaskbar = false;
+                WindowState = FormWindowState.Minimized;
+                FormBorderStyle = FormBorderStyle.None;
+                Load += HiddenForm_Load;
             }
 
-            return _exitCode;
+            private async void HiddenForm_Load(object sender, EventArgs e)
+            {
+                // Keep it hidden even though Load requires the form to be "shown".
+                Hide();
+
+                try
+                {
+                    _exitCode = await RunAsync(_args);
+                }
+                catch (Exception ex)
+                {
+                    DumpException(ex);
+                    _exitCode = 1;
+                }
+                finally
+                {
+                    Close();
+                }
+            }
         }
 
         static void DumpException(Exception ex)
