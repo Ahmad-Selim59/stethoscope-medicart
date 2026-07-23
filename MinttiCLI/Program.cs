@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -16,12 +19,77 @@ namespace MinttiCLI
         private static int _exitCode;
         private static string[] _args;
 
+        // Background stdout writer. SDK callbacks (audio data) fire on the message-pump
+        // thread; writing large JSON directly there blocks the pump and stalls the BLE
+        // stream after a couple of packets. We instead enqueue lines and let a dedicated
+        // thread drain them to a buffered stdout, keeping callbacks instant.
+        private static readonly BlockingCollection<string> _outputQueue =
+            new BlockingCollection<string>(new ConcurrentQueue<string>());
+        private static Thread _outputThread;
+
+        static void StartOutputWriter()
+        {
+            var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16)
+            {
+                AutoFlush = false
+            };
+
+            _outputThread = new Thread(() =>
+            {
+                try
+                {
+                    foreach (var line in _outputQueue.GetConsumingEnumerable())
+                    {
+                        stdout.WriteLine(line);
+                        // Flush when the queue drains so consumers get timely data without
+                        // paying a syscall per line during bursts.
+                        if (_outputQueue.Count == 0)
+                        {
+                            stdout.Flush();
+                        }
+                    }
+                }
+                catch { /* shutting down */ }
+                finally
+                {
+                    try { stdout.Flush(); } catch { }
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "stdout-writer"
+            };
+            _outputThread.Start();
+        }
+
+        // Enqueue a line for the background writer (non-blocking for SDK callbacks).
+        static void Emit(string line)
+        {
+            if (!_outputQueue.IsAddingCompleted)
+            {
+                _outputQueue.Add(line);
+            }
+        }
+
+        static void FlushOutput()
+        {
+            try
+            {
+                _outputQueue.CompleteAdding();
+                _outputThread?.Join(TimeSpan.FromSeconds(2));
+            }
+            catch { /* ignore */ }
+        }
+
         [STAThread]
         static int Main(string[] args)
         {
+            StartOutputWriter();
+
             if (args.Length == 0 || args.Contains("-help") || args.Contains("--help"))
             {
                 PrintHelp();
+                FlushOutput();
                 return 0;
             }
 
@@ -83,6 +151,9 @@ namespace MinttiCLI
                     catch { /* ignore */ }
 
                     Close();
+
+                    // Drain any queued stdout before we terminate.
+                    FlushOutput();
 
                     // Force the process to terminate immediately so no background SDK
                     // thread keeps the Bluetooth adapter busy after we're done.
@@ -177,23 +248,24 @@ namespace MinttiCLI
                     {
                         _connectResult.TrySetResult(false);
                     }
-                    Console.WriteLine($"DATA:STATUS type=connection message=\"{message}\"");
+                    Emit($"DATA:STATUS type=connection message=\"{message}\"");
                 }
             };
 
-            // Auscultation audio data.
+            // Auscultation audio data. Enqueue to the background writer so this callback
+            // returns immediately and never blocks the message pump / BLE pipeline.
             ble.DataCallback += (data) =>
             {
                 if (!_streaming) return;
                 string jsonData = JsonConvert.SerializeObject(data);
-                Console.WriteLine($"DATA:STREAM type=audio data={jsonData}");
+                Emit($"DATA:STREAM type=audio data={jsonData}");
             };
 
             // Heart rate.
             ble.HeartRateCallback += (hr) =>
             {
                 if (!_streaming) return;
-                Console.WriteLine($"DATA:STREAM type=heartrate value={hr}");
+                Emit($"DATA:STREAM type=heartrate value={hr}");
             };
 
             // The remaining events are not used by the CLI, but MUST be subscribed so the
@@ -206,37 +278,37 @@ namespace MinttiCLI
 
         static void PrintHelp()
         {
-            Console.WriteLine("Mintti Stethoscope CLI Tool");
-            Console.WriteLine("Usage:");
-            Console.WriteLine("  mintti_cli.exe [options]");
-            Console.WriteLine();
-            Console.WriteLine("Options:");
-            Console.WriteLine("  -list              Scan for available stethoscope devices (5 seconds).");
-            Console.WriteLine("  -connect -mac MAC  Connect to a device and stream data to stdout.");
-            Console.WriteLine("  -help              Show this help message.");
-            Console.WriteLine();
-            Console.WriteLine("Examples:");
-            Console.WriteLine("  mintti_cli.exe -list");
-            Console.WriteLine("  mintti_cli.exe -connect -mac AA:BB:CC:DD:EE:FF");
-            Console.WriteLine();
-            Console.WriteLine("Data Format (Stdout):");
-            Console.WriteLine("  List:        DATA:ITEM index={n} name=\"{name}\" mac=\"{mac}\"");
-            Console.WriteLine("  Stream:      DATA:STREAM type=audio data=[...]");
-            Console.WriteLine("  Heart Rate:  DATA:STREAM type=heartrate value={int}");
-            Console.WriteLine("  Status:      DATA:STATUS message=\"...\"");
-            Console.WriteLine("  Error:       DATA:ERROR code={code} message=\"...\"");
+            Emit("Mintti Stethoscope CLI Tool");
+            Emit("Usage:");
+            Emit("  MinttiCLI.exe [options]");
+            Emit("");
+            Emit("Options:");
+            Emit("  -list              Scan for available stethoscope devices (5 seconds).");
+            Emit("  -connect -mac MAC  Connect to a device and stream data to stdout.");
+            Emit("  -help              Show this help message.");
+            Emit("");
+            Emit("Examples:");
+            Emit("  MinttiCLI.exe -list");
+            Emit("  MinttiCLI.exe -connect -mac AA:BB:CC:DD:EE:FF");
+            Emit("");
+            Emit("Data Format (Stdout):");
+            Emit("  List:        DATA:ITEM index={n} name=\"{name}\" mac=\"{mac}\"");
+            Emit("  Stream:      DATA:STREAM type=audio data=[...]");
+            Emit("  Heart Rate:  DATA:STREAM type=heartrate value={int}");
+            Emit("  Status:      DATA:STATUS message=\"...\"");
+            Emit("  Error:       DATA:ERROR code={code} message=\"...\"");
         }
 
         static void PrintError(string code, string message)
         {
-            Console.WriteLine($"DATA:ERROR code={code} message=\"{message}\"");
+            Emit($"DATA:ERROR code={code} message=\"{message}\"");
         }
 
         static void PrintOk(string command, string extra = "")
         {
             string output = $"DATA:OK command={command}";
             if (!string.IsNullOrEmpty(extra)) output += " " + extra;
-            Console.WriteLine(output);
+            Emit(output);
         }
 
         static string GetArgValue(string[] args, string flag)
@@ -276,7 +348,7 @@ namespace MinttiCLI
             }
 
             ble.StartBleDeviceWatcher();
-            Console.WriteLine("DATA:STATUS message=\"Scanning for 5 seconds...\"");
+            Emit("DATA:STATUS message=\"Scanning for 5 seconds...\"");
             await Task.Delay(5000);
             ble.StopBleDeviceWatcher();
 
@@ -286,10 +358,10 @@ namespace MinttiCLI
                 found = _devices.ToArray();
             }
 
-            Console.WriteLine($"DATA:LIST count={found.Length}");
+            Emit($"DATA:LIST count={found.Length}");
             for (int i = 0; i < found.Length; i++)
             {
-                Console.WriteLine($"DATA:ITEM index={i} name=\"{found[i].Name}\" mac=\"{found[i].Mac}\"");
+                Emit($"DATA:ITEM index={i} name=\"{found[i].Name}\" mac=\"{found[i].Mac}\"");
             }
             PrintOk("list");
             return 0;
@@ -306,7 +378,7 @@ namespace MinttiCLI
             // in THIS session (ConnectByMac looks the MAC up in a cache the watcher fills).
             // Since -connect is a fresh process, we must scan first -- exactly like the GUI
             // (scan -> device appears -> select -> connect).
-            Console.WriteLine("DATA:STATUS message=\"Scanning for target device...\"");
+            Emit("DATA:STATUS message=\"Scanning for target device...\"");
 
             // Create a FRESH result BEFORE scanning so a real CONNECTED can resolve it, but
             // reset again right before connecting so transient scan-phase messages can't
@@ -340,7 +412,7 @@ namespace MinttiCLI
             // cache is keyed on this), not the raw command-line arg. The GUI does the same.
             string targetMac = target.Mac;
             Console.Error.WriteLine($"[SDK] Connecting to discovered device name=\"{target.Name}\" mac=\"{targetMac}\"");
-            Console.WriteLine("DATA:STATUS message=\"Device found, connecting...\"");
+            Emit("DATA:STATUS message=\"Device found, connecting...\"");
 
             // IMPORTANT: Connect while the watcher is STILL RUNNING. Stopping the watcher
             // evicts the SDK's freshly-discovered device object, after which ConnectByMac
@@ -370,13 +442,15 @@ namespace MinttiCLI
 
             _streaming = true;
             ble.StartMeasure();
-            Console.WriteLine("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
+            Emit("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
             var tcs = new TaskCompletionSource<bool>();
             Console.CancelKeyPress += (s, e) =>
             {
                 e.Cancel = true;
-                tcs.SetResult(true);
+                // TrySetResult: a second Ctrl+C (or a race) must not throw
+                // "attempt to transition a task to a final state when it had already completed".
+                tcs.TrySetResult(true);
             };
 
             await tcs.Task;
