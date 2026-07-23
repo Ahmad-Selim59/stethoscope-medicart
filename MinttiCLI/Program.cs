@@ -11,7 +11,6 @@ using System.Windows.Forms;
 using mintti_sdk.ble.bean;
 using mintti_sdk.ble.constants;
 using mintti_sdk.ble.manager;
-using Newtonsoft.Json;
 
 namespace MinttiCLI
 {
@@ -33,6 +32,11 @@ namespace MinttiCLI
         {
             public bool IsError;
             public string Text;
+            // When non-null, this is a raw audio frame; the writer thread formats it into the
+            // "DATA:STREAM type=audio data=[...]" line. Keeping the (expensive) formatting off
+            // the SDK's delivery thread is critical: any per-frame work on that thread stalls the
+            // BLE pipeline and the device drops the link after ~1s.
+            public short[] Audio;
         }
 
         // Single background writer for BOTH stdout (DATA) and stderr (diagnostics). SDK
@@ -112,10 +116,29 @@ namespace MinttiCLI
             {
                 try
                 {
+                    var sb = new StringBuilder(16384);
                     foreach (var item in _outputQueue.GetConsumingEnumerable())
                     {
-                        var target = item.IsError ? stderr : stdout;
-                        target.WriteLine(item.Text);
+                        if (item.Audio != null)
+                        {
+                            // Format the audio frame here, on the writer thread, NOT on the SDK
+                            // delivery thread.
+                            sb.Clear();
+                            sb.Append("DATA:STREAM type=audio data=[");
+                            short[] a = item.Audio;
+                            for (int i = 0; i < a.Length; i++)
+                            {
+                                if (i > 0) sb.Append(',');
+                                sb.Append(a[i]);
+                            }
+                            sb.Append(']');
+                            stdout.WriteLine(sb.ToString());
+                        }
+                        else
+                        {
+                            var target = item.IsError ? stderr : stdout;
+                            target.WriteLine(item.Text);
+                        }
                         // Flush when the queue drains so consumers get timely data without
                         // paying a syscall per line during bursts.
                         if (_outputQueue.Count == 0)
@@ -145,6 +168,16 @@ namespace MinttiCLI
             if (!_outputQueue.IsAddingCompleted)
             {
                 _outputQueue.Add(new OutLine { IsError = false, Text = line });
+            }
+        }
+
+        // Enqueue a raw audio frame; formatting happens on the writer thread. This keeps the
+        // SDK's audio-delivery thread free (see OutLine.Audio).
+        static void EmitAudio(short[] data)
+        {
+            if (data != null && !_outputQueue.IsAddingCompleted)
+            {
+                _outputQueue.Add(new OutLine { IsError = false, Audio = data });
             }
         }
 
@@ -459,13 +492,14 @@ namespace MinttiCLI
                 }
             };
 
-            // Auscultation audio data. Enqueue to the background writer so this callback
-            // returns immediately and never blocks the message pump / BLE pipeline.
+            // Auscultation audio data. Hand the raw frame straight to the background writer
+            // (which formats it) so this callback does essentially no work and never stalls the
+            // SDK's delivery thread -- any per-frame work here accumulates lag and the device
+            // drops the link after ~1s. Clone the buffer in case the SDK reuses the array.
             ble.DataCallback += (data) =>
             {
-                if (!_streaming) return;
-                string jsonData = JsonConvert.SerializeObject(data);
-                Emit($"DATA:STREAM type=audio data={jsonData}");
+                if (!_streaming || data == null) return;
+                EmitAudio((short[])data.Clone());
             };
 
             // Heart rate.
@@ -703,7 +737,13 @@ namespace MinttiCLI
                 return 1;
             }
 
-            ble.StartMeasure();
+            // Call StartMeasure on a background thread (no WinForms SynchronizationContext).
+            // StartMeasure subscribes to the audio GattCharacteristic.ValueChanged; if we do it
+            // on the UI thread, WinRT marshals every audio notification back to the message-pump
+            // thread, where the SDK's per-frame decode/FFT work stalls the BLE pipeline (we saw
+            // it survive only ~4 frames). Subscribing from a pool thread lets the notifications
+            // be delivered on the thread pool, keeping the pump free to service the connection.
+            await Task.Run(() => ble.StartMeasure());
             Emit("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
             Console.CancelKeyPress += (s, e) =>
