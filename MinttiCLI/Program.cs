@@ -107,7 +107,7 @@ namespace MinttiCLI
 
         // Shared state touched by the SDK event handlers.
         private static readonly List<DeviceInfo> _devices = new List<DeviceInfo>();
-        private static readonly TaskCompletionSource<bool> _connectResult = new TaskCompletionSource<bool>();
+        private static TaskCompletionSource<bool> _connectResult = new TaskCompletionSource<bool>();
         private static bool _streaming;
 
         static async Task<int> RunAsync(string[] args)
@@ -340,6 +340,10 @@ namespace MinttiCLI
 
             // Give the BLE stack a brief moment to settle after stopping the watcher.
             await Task.Delay(500);
+
+            // Create a FRESH result here so any transient ConnectStatus message emitted
+            // during the scan/stop phase can't pre-latch our connection outcome.
+            _connectResult = new TaskCompletionSource<bool>();
             ble.ConnectByMac(targetMac);
 
             // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
