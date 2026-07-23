@@ -164,6 +164,48 @@ namespace MinttiCLI
             catch { /* ignore */ }
         }
 
+        // Ensures the SDK is torn down exactly once.
+        private static int _disposed;
+
+        // Tear down the SDK the SAME way the vendor GUI does: run StopMeasure()/Dispose() on a
+        // BACKGROUND thread and AWAIT it, so the UI/message-pump thread stays free. The SDK's
+        // Dispose internally awaits WinRT GATT calls whose completions post back to the UI
+        // thread; if we Dispose ON the UI thread we block it and Dispose deadlocks / half-
+        // completes ("Collection was modified"), leaking the BluetoothLEDevice + GATT session.
+        // That leak is what forces a Bluetooth off/on between runs. Awaiting a background
+        // Dispose lets it complete cleanly and actually release the radio.
+        static async Task ShutdownSdkAsync(int timeoutMs = 5000)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return; // already torn down
+            }
+
+            var ble = MinttiBle.GetInstance;
+            bool wasStreaming = _streaming;
+            _streaming = false;
+
+            var teardown = Task.Run(() =>
+            {
+                try { ble.StopBleDeviceWatcher(); } catch (Exception ex) { LogErr("StopBleDeviceWatcher: " + ex.Message); }
+                // StopMeasure throws inside the SDK if the device already dropped; only call it
+                // if we were actually streaming, and guard it regardless.
+                if (wasStreaming)
+                {
+                    try { ble.StopMeasure(); } catch (Exception ex) { LogErr("StopMeasure: " + ex.Message); }
+                }
+                try { ble.Dispose(); } catch (Exception ex) { LogErr("Dispose: " + ex.Message); }
+            });
+
+            // Await (don't block) so the message pump keeps delivering the WinRT completions
+            // that Dispose is waiting on. Cap it so a truly stuck SDK can't hang forever.
+            var done = await Task.WhenAny(teardown, Task.Delay(timeoutMs));
+            if (done != teardown)
+            {
+                LogErr("SDK teardown timed out; forcing exit.");
+            }
+        }
+
         [STAThread]
         static int Main(string[] args)
         {
@@ -224,28 +266,15 @@ namespace MinttiCLI
                 }
                 finally
                 {
-                    // Always release the BLE adapter/device so we never leave the radio
-                    // held by this process (a lingering handle stops the device from
-                    // advertising, which makes later scans find nothing).
-                    try
-                    {
-                        MinttiBle.GetInstance.StopBleDeviceWatcher();
-                    }
-                    catch { /* ignore */ }
-                    try
-                    {
-                        MinttiBle.GetInstance.Dispose();
-                    }
-                    catch { /* ignore */ }
+                    // Cleanly release the BLE adapter/device (background dispose, awaited, so
+                    // the pump stays alive and Dispose can actually finish -- see
+                    // ShutdownSdkAsync). Idempotent: if the stream path already tore down, this
+                    // is a no-op.
+                    await ShutdownSdkAsync();
 
-                    // Give the BLE stack time to actually send the disconnect PDU to the
-                    // device before we kill the process. Without this, Environment.Exit tears
-                    // the process down mid-disconnect, leaving the stethoscope half-connected
-                    // on its side. The next run then gets a stale, cached GATT handle from
-                    // Windows (symptom: "GattServices size=0" / immediate "Disconnect"),
-                    // which only a power-cycle clears. This settle delay is what lets repeated
-                    // connect/disconnect cycles work without power-cycling the device.
-                    Thread.Sleep(2000);
+                    // Give the BLE stack a moment to send the disconnect PDU to the device
+                    // before we kill the process, so the device isn't left half-connected.
+                    await Task.Delay(1000);
 
                     Close();
 
@@ -362,6 +391,16 @@ namespace MinttiCLI
                     }
                     Emit($"DATA:STATUS type=connection message=\"{message}\"");
                 }
+                else if (message != null &&
+                         (message.IndexOf("notification", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                          message.IndexOf("unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                          message.IndexOf("Unreachable", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    // Surface the GATT-notification / link-health messages even without
+                    // -verbose: these are the ones that reveal WHY a stream fails to start
+                    // (e.g. "Failed to set notification", "Device unavailable").
+                    Emit($"DATA:STATUS type=sdk message=\"{message}\"");
+                }
             };
 
             // Auscultation audio data. Enqueue to the background writer so this callback
@@ -397,6 +436,7 @@ namespace MinttiCLI
             Emit("Options:");
             Emit("  -list              Scan for available stethoscope devices (5 seconds).");
             Emit("  -connect -mac MAC  Connect to a device and stream data to stdout.");
+            Emit("  -warmup MS         Delay (ms) after connect before streaming (default 1500).");
             Emit("  -verbose, -v       Print SDK diagnostics to stderr (for debugging).");
             Emit("  -help              Show this help message.");
             Emit("");
@@ -583,16 +623,26 @@ namespace MinttiCLI
             // callback's _streaming guard is unaffected.
             _streamEnded = new TaskCompletionSource<bool>();
             _streaming = true;
-            Emit("DATA:STATUS message=\"Preparing stream...\"");
 
-            var settle = await Task.WhenAny(_streamEnded.Task, Task.Delay(2500));
+            // How long to let GATT setup settle before StartMeasure. Tunable via
+            // "-warmup <ms>" because the sweet spot is device/stack dependent: too short and
+            // StartMeasure races GATT setup (device drops); too long and the device's own
+            // idle timer may drop the link first.
+            int warmupMs = 1500;
+            string warmupArg = GetArgValue(_args ?? Array.Empty<string>(), "-warmup");
+            if (warmupArg != null && int.TryParse(warmupArg, out int w) && w >= 0)
+            {
+                warmupMs = w;
+            }
+            Emit($"DATA:STATUS message=\"Preparing stream ({warmupMs}ms)...\"");
+
+            var settle = await Task.WhenAny(_streamEnded.Task, Task.Delay(warmupMs));
             if (settle == _streamEnded.Task)
             {
                 // Device dropped during the post-connect settle.
-                _streaming = false;
                 PrintError("CONNECT_FAILED",
                     "Device " + targetMac + " disconnected before streaming could start.");
-                try { ble.Dispose(); } catch (Exception ex) { LogErr("Dispose failed: " + ex.Message); }
+                await ShutdownSdkAsync();
                 return 1;
             }
 
@@ -627,12 +677,8 @@ namespace MinttiCLI
             // Ends on Ctrl+C or on a mid-stream disconnect (set from the MessageChanged handler).
             await _streamEnded.Task;
 
-            _streaming = false;
             Emit("DATA:STATUS message=\"Stopping and disconnecting...\"");
-            // Guard both: if the device already disconnected, the SDK throws a
-            // NullReferenceException inside StopEnableNotifications (characteristic is null).
-            try { ble.StopMeasure(); } catch (Exception ex) { LogErr("StopMeasure failed: " + ex.Message); }
-            try { ble.Dispose(); } catch (Exception ex) { LogErr("Dispose failed: " + ex.Message); }
+            await ShutdownSdkAsync();
             PrintOk("stop");
             return 0;
         }
