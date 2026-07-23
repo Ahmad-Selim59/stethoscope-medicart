@@ -280,10 +280,41 @@ namespace MinttiCLI
                 return 1;
             }
 
+            // The SDK can only connect to a device it has already discovered during a scan
+            // in THIS session (ConnectByMac looks the MAC up in a cache the watcher fills).
+            // Since -connect is a fresh process, we must scan first -- exactly like the GUI
+            // (scan -> device appears -> select -> connect).
+            Console.WriteLine("DATA:STATUS message=\"Scanning for target device...\"");
+            ble.StartBleDeviceWatcher();
+
+            bool found = false;
+            var scanDeadline = DateTime.UtcNow.AddSeconds(15);
+            while (DateTime.UtcNow < scanDeadline)
+            {
+                lock (_devices)
+                {
+                    found = _devices.Any(d => string.Equals(d.Mac, mac, StringComparison.OrdinalIgnoreCase));
+                }
+                if (found)
+                {
+                    break;
+                }
+                await Task.Delay(300);
+            }
+
+            ble.StopBleDeviceWatcher();
+
+            if (!found)
+            {
+                PrintError("DEVICE_NOT_FOUND", "Device " + mac + " was not found during scan. Make sure it is powered on and in range.");
+                return 1;
+            }
+
+            Console.WriteLine("DATA:STATUS message=\"Device found, connecting...\"");
             ble.ConnectByMac(mac);
 
             // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
-            var timeout = Task.Delay(10000);
+            var timeout = Task.Delay(15000);
             var finished = await Task.WhenAny(_connectResult.Task, timeout);
             bool connected = finished == _connectResult.Task && _connectResult.Task.Result;
 
