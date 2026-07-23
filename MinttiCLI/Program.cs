@@ -68,7 +68,25 @@ namespace MinttiCLI
                 }
                 finally
                 {
+                    // Always release the BLE adapter/device so we never leave the radio
+                    // held by this process (a lingering handle stops the device from
+                    // advertising, which makes later scans find nothing).
+                    try
+                    {
+                        MinttiBle.GetInstance.StopBleDeviceWatcher();
+                    }
+                    catch { /* ignore */ }
+                    try
+                    {
+                        MinttiBle.GetInstance.Dispose();
+                    }
+                    catch { /* ignore */ }
+
                     Close();
+
+                    // Force the process to terminate immediately so no background SDK
+                    // thread keeps the Bluetooth adapter busy after we're done.
+                    Environment.Exit(_exitCode);
                 }
             }
         }
