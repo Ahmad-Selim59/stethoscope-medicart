@@ -163,6 +163,10 @@ namespace MinttiCLI
             // Connection status + general messages.
             ble.MessageChanged += (type, message, data) =>
             {
+                // Log EVERY message the SDK emits so we can see exactly what happens
+                // during a connect attempt (written to stderr so it doesn't pollute stdout).
+                Console.Error.WriteLine($"[SDK] MessageChanged type={type} message=\"{message}\"");
+
                 if (type == MsgType.ConnectStatus)
                 {
                     if (message == MinttiConstants.CONNECTED)
@@ -305,15 +309,15 @@ namespace MinttiCLI
             Console.WriteLine("DATA:STATUS message=\"Scanning for target device...\"");
             ble.StartBleDeviceWatcher();
 
-            bool found = false;
+            DeviceInfo target = null;
             var scanDeadline = DateTime.UtcNow.AddSeconds(15);
             while (DateTime.UtcNow < scanDeadline)
             {
                 lock (_devices)
                 {
-                    found = _devices.Any(d => string.Equals(d.Mac, mac, StringComparison.OrdinalIgnoreCase));
+                    target = _devices.FirstOrDefault(d => string.Equals(d.Mac, mac, StringComparison.OrdinalIgnoreCase));
                 }
-                if (found)
+                if (target != null)
                 {
                     break;
                 }
@@ -322,27 +326,37 @@ namespace MinttiCLI
 
             ble.StopBleDeviceWatcher();
 
-            if (!found)
+            if (target == null)
             {
                 PrintError("DEVICE_NOT_FOUND", "Device " + mac + " was not found during scan. Make sure it is powered on and in range.");
                 return 1;
             }
 
+            // Use the EXACT MAC string the SDK reported during discovery (its internal
+            // cache is keyed on this), not the raw command-line arg. The GUI does the same.
+            string targetMac = target.Mac;
+            Console.Error.WriteLine($"[SDK] Connecting to discovered device name=\"{target.Name}\" mac=\"{targetMac}\"");
             Console.WriteLine("DATA:STATUS message=\"Device found, connecting...\"");
-            ble.ConnectByMac(mac);
+
+            // Give the BLE stack a brief moment to settle after stopping the watcher.
+            await Task.Delay(500);
+            ble.ConnectByMac(targetMac);
 
             // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
-            var timeout = Task.Delay(15000);
+            var timeout = Task.Delay(25000);
             var finished = await Task.WhenAny(_connectResult.Task, timeout);
             bool connected = finished == _connectResult.Task && _connectResult.Task.Result;
 
             if (!connected)
             {
-                PrintError("CONNECT_FAILED", "Failed to connect to device " + mac);
+                string reason = finished == _connectResult.Task
+                    ? "SDK reported connection failed/disconnected"
+                    : "timed out waiting for connection (no status from device)";
+                PrintError("CONNECT_FAILED", "Failed to connect to device " + targetMac + " - " + reason);
                 return 1;
             }
 
-            PrintOk("connect", $"mac={mac}");
+            PrintOk("connect", $"mac={targetMac}");
 
             _streaming = true;
             ble.StartMeasure();
