@@ -46,6 +46,12 @@
       <SdkDlls Include="$(SdkBinDir)\*.dll"
                Exclude="$(SdkBinDir)\mintti_sdk.dll"
                Condition="Exists('$(SdkBinDir)')" />
+
+      <!-- The native algorithm library (MinttiAlgo.dll) and its own native dependencies
+           live in the algo_lib subfolder. Flatten them next to the exe so the SDK's
+           P/Invoke (DllImport "MinttiAlgo.dll") and its dependency chain resolve. -->
+      <SdkDlls Include="$(SdkBinDir)\algo_lib\*.dll"
+               Condition="Exists('$(SdkBinDir)\algo_lib')" />
     </ItemGroup>
 
     <Warning Text="No SDK DLLs found in '$(SdkBinDir)'. MinttiAlgo.dll and other native deps will be missing at runtime."
