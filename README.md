@@ -13,3 +13,6 @@ Invoke-WebRequest $u -OutFile deps.zip; Expand-Archive deps.zip -DestinationPath
 
 
 .\MinttiCLI.exe -connect -mac c6:38:8f:83:54:80 -verbose > out.txt 2> err.txt
+
+Get-Content .\err.txt
+Get-Content $env:TEMP\mintti_native.log

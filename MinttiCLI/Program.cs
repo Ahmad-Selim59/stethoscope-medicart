@@ -62,19 +62,33 @@ namespace MinttiCLI
             string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes,
             uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
-        private static void RedirectNativeStdIoToNul()
+        // Point the process's native stdout/stderr at a real LOG FILE (not the console, and NOT
+        // NUL). Why a file:
+        //  * The native MinttiAlgo.dll printf's debug spam ("?????", "initAlgo2", "fft:") to the
+        //    process std handles. On a live console those synchronous writes stall the SDK's BLE
+        //    thread and the device drops; and they also pollute our DATA: protocol on stdout.
+        //  * Redirecting to NUL fixed the console stall but BROKE the algo (it stopped producing
+        //    audio packets -- the null device behaves differently from a normal handle).
+        //  * A normal file handle behaves like the working piped case: the algo keeps producing
+        //    audio, there's no console stall, AND our DATA output stays clean because the managed
+        //    background writer holds the ORIGINAL stdout/stderr handles (captured in
+        //    StartOutputWriter before this redirect).
+        private static void RedirectNativeStdIoToLog()
         {
             try
             {
                 const uint GENERIC_WRITE = 0x40000000;
                 const uint FILE_SHARE_READ = 0x1, FILE_SHARE_WRITE = 0x2;
-                const uint OPEN_EXISTING = 3;
-                IntPtr nul = CreateFileW("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-                if (nul != IntPtr.Zero && nul.ToInt64() != -1)
+                const uint CREATE_ALWAYS = 2;
+                const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+                string logPath = Path.Combine(Path.GetTempPath(), "mintti_native.log");
+                IntPtr log = CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    IntPtr.Zero, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+                if (log != IntPtr.Zero && log.ToInt64() != -1)
                 {
-                    SetStdHandle(STD_OUTPUT_HANDLE, nul);
-                    SetStdHandle(STD_ERROR_HANDLE, nul);
+                    SetStdHandle(STD_OUTPUT_HANDLE, log);
+                    SetStdHandle(STD_ERROR_HANDLE, log);
                 }
             }
             catch { /* best-effort; harmless if it fails */ }
@@ -218,17 +232,42 @@ namespace MinttiCLI
                 return 0;
             }
 
-            // Optionally silence the native SDK's printf spam (see RedirectNativeStdIoToNul).
-            // IMPORTANT: pointing the native std handles at NUL appears to break MinttiAlgo.dll's
-            // audio pipeline (it stops producing decoded packets), so we only do it when it's
-            // actually needed -- an INTERACTIVE console, where the native printf would otherwise
-            // stall the BLE thread. When stdout is piped (the real medicart integration), the
-            // pipe is fast, there's no stall, and we leave the native lib completely untouched so
-            // audio flows. "-noredirect" force-disables it for debugging.
-            bool pipedOutput = Console.IsOutputRedirected;
-            if (!pipedOutput && !args.Contains("-noredirect"))
+            // The Mintti SDK spawns background threads (StartMeasure runs a param-refresh loop)
+            // and can throw there. The vendor demo installs an AppDomain.UnhandledException
+            // handler; without it, such an error is invisible to us and the stream silently
+            // stalls after the first frame. Capture ALL of them to our log so we can see the
+            // real failure. (Also route WinForms UI-thread exceptions here instead of letting a
+            // hidden dialog block the message pump.)
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
             {
-                RedirectNativeStdIoToNul();
+                LogErr("=== WinForms ThreadException ===");
+                LogErr(e.Exception?.ToString() ?? "(null)");
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                LogErr("=== AppDomain UnhandledException (IsTerminating=" + e.IsTerminating + ") ===");
+                LogErr((e.ExceptionObject as Exception)?.ToString() ?? e.ExceptionObject?.ToString() ?? "(null)");
+                if (e.IsTerminating)
+                {
+                    // Process is about to die -- force the queued log out before it does.
+                    FlushOutput();
+                }
+            };
+            TaskScheduler.UnobservedTaskException += (s, e) =>
+            {
+                LogErr("=== UnobservedTaskException ===");
+                LogErr(e.Exception?.ToString() ?? "(null)");
+                e.SetObserved();
+            };
+
+            // Send the native SDK's printf spam to a temp log file so it neither stalls the BLE
+            // thread (on a console) nor pollutes our DATA: protocol on stdout. A file handle
+            // keeps MinttiAlgo.dll working, unlike NUL. "-noredirect" disables this entirely
+            // (native output then goes wherever stdout/stderr point -- useful for debugging).
+            if (!args.Contains("-noredirect"))
+            {
+                RedirectNativeStdIoToLog();
             }
 
             Application.EnableVisualStyles();
@@ -445,7 +484,7 @@ namespace MinttiCLI
             Emit("  -list              Scan for available stethoscope devices (5 seconds).");
             Emit("  -connect -mac MAC  Connect to a device and stream data to stdout.");
             Emit("  -warmup MS         Delay (ms) after connect before streaming (default 1500).");
-            Emit("  -noredirect        Do not redirect native SDK stdout (debugging).");
+            Emit("  -noredirect        Keep native SDK output on stdout (debugging; noisy).");
             Emit("  -verbose, -v       Print SDK diagnostics to stderr (for debugging).");
             Emit("  -help              Show this help message.");
             Emit("");
