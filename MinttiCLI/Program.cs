@@ -19,12 +19,27 @@ namespace MinttiCLI
         private static int _exitCode;
         private static string[] _args;
 
-        // Background stdout writer. SDK callbacks (audio data) fire on the message-pump
-        // thread; writing large JSON directly there blocks the pump and stalls the BLE
-        // stream after a couple of packets. We instead enqueue lines and let a dedicated
-        // thread drain them to a buffered stdout, keeping callbacks instant.
-        private static readonly BlockingCollection<string> _outputQueue =
-            new BlockingCollection<string>(new ConcurrentQueue<string>());
+        // When true, verbose [SDK] diagnostics are emitted (to stderr). OFF by default:
+        // the SDK callbacks fire on the BLE worker thread, and doing synchronous console
+        // writes there stalls that thread. If the stall exceeds the BLE supervision
+        // timeout the device itself drops the link (symptom: one audio packet, then
+        // "Device unavailable"). Keeping diagnostics off (or async, see below) keeps the
+        // BLE thread responsive so streaming stays alive.
+        private static bool _verbose;
+
+        // A queued output line and which stream it belongs to.
+        private struct OutLine
+        {
+            public bool IsError;
+            public string Text;
+        }
+
+        // Single background writer for BOTH stdout (DATA) and stderr (diagnostics). SDK
+        // callbacks fire on the BLE worker thread; writing to a (slow) console there blocks
+        // that thread and stalls/drops the BLE stream. We instead enqueue every line and let
+        // this dedicated thread drain it, keeping all callbacks instant and non-blocking.
+        private static readonly BlockingCollection<OutLine> _outputQueue =
+            new BlockingCollection<OutLine>(new ConcurrentQueue<OutLine>());
         private static Thread _outputThread;
 
         static void StartOutputWriter()
@@ -33,19 +48,25 @@ namespace MinttiCLI
             {
                 AutoFlush = false
             };
+            var stderr = new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false), 1 << 16)
+            {
+                AutoFlush = false
+            };
 
             _outputThread = new Thread(() =>
             {
                 try
                 {
-                    foreach (var line in _outputQueue.GetConsumingEnumerable())
+                    foreach (var item in _outputQueue.GetConsumingEnumerable())
                     {
-                        stdout.WriteLine(line);
+                        var target = item.IsError ? stderr : stdout;
+                        target.WriteLine(item.Text);
                         // Flush when the queue drains so consumers get timely data without
                         // paying a syscall per line during bursts.
                         if (_outputQueue.Count == 0)
                         {
                             stdout.Flush();
+                            stderr.Flush();
                         }
                     }
                 }
@@ -53,21 +74,42 @@ namespace MinttiCLI
                 finally
                 {
                     try { stdout.Flush(); } catch { }
+                    try { stderr.Flush(); } catch { }
                 }
             })
             {
                 IsBackground = true,
-                Name = "stdout-writer"
+                Name = "output-writer"
             };
             _outputThread.Start();
         }
 
-        // Enqueue a line for the background writer (non-blocking for SDK callbacks).
+        // Enqueue a DATA line for stdout (non-blocking for SDK callbacks).
         static void Emit(string line)
         {
             if (!_outputQueue.IsAddingCompleted)
             {
-                _outputQueue.Add(line);
+                _outputQueue.Add(new OutLine { IsError = false, Text = line });
+            }
+        }
+
+        // Enqueue a diagnostic line for stderr, only when -verbose is set. Also non-blocking
+        // so it can never stall the BLE worker thread.
+        static void Log(string line)
+        {
+            if (_verbose && !_outputQueue.IsAddingCompleted)
+            {
+                _outputQueue.Add(new OutLine { IsError = true, Text = line });
+            }
+        }
+
+        // Always-on diagnostic to stderr (errors/exception dumps), routed through the same
+        // writer so it never blocks and never interleaves with the buffered streams.
+        static void LogErr(string line)
+        {
+            if (!_outputQueue.IsAddingCompleted)
+            {
+                _outputQueue.Add(new OutLine { IsError = true, Text = line });
             }
         }
 
@@ -174,13 +216,13 @@ namespace MinttiCLI
         static void DumpException(Exception ex)
         {
             PrintError("INTERNAL_ERROR", ex.Message);
-            Console.Error.WriteLine("=== FULL EXCEPTION (debug) ===");
-            Console.Error.WriteLine(ex.ToString());
+            LogErr("=== FULL EXCEPTION (debug) ===");
+            LogErr(ex.ToString());
             var inner = ex.InnerException;
             while (inner != null)
             {
-                Console.Error.WriteLine("--- Inner Exception ---");
-                Console.Error.WriteLine(inner.ToString());
+                LogErr("--- Inner Exception ---");
+                LogErr(inner.ToString());
                 inner = inner.InnerException;
             }
         }
@@ -192,6 +234,10 @@ namespace MinttiCLI
 
         static async Task<int> RunAsync(string[] args)
         {
+            // Verbose SDK diagnostics are OFF by default: synchronous logging on the SDK's
+            // BLE callback thread can stall it and make the device drop the link mid-stream.
+            _verbose = args.Contains("-verbose") || args.Contains("-v");
+
             var ble = MinttiBle.GetInstance;
 
             // IMPORTANT: The Mintti SDK raises several of these events internally (some
@@ -245,7 +291,7 @@ namespace MinttiCLI
             {
                 // Log EVERY message the SDK emits so we can see exactly what happens
                 // during a connect attempt (written to stderr so it doesn't pollute stdout).
-                Console.Error.WriteLine($"[SDK] MessageChanged type={type} message=\"{message}\"");
+                Log($"[SDK] MessageChanged type={type} message=\"{message}\"");
 
                 if (type == MsgType.ConnectStatus)
                 {
@@ -294,6 +340,7 @@ namespace MinttiCLI
             Emit("Options:");
             Emit("  -list              Scan for available stethoscope devices (5 seconds).");
             Emit("  -connect -mac MAC  Connect to a device and stream data to stdout.");
+            Emit("  -verbose, -v       Print SDK diagnostics to stderr (for debugging).");
             Emit("  -help              Show this help message.");
             Emit("");
             Emit("Examples:");
@@ -420,7 +467,7 @@ namespace MinttiCLI
             // Use the EXACT MAC string the SDK reported during discovery (its internal
             // cache is keyed on this), not the raw command-line arg. The GUI does the same.
             string targetMac = target.Mac;
-            Console.Error.WriteLine($"[SDK] Connecting to discovered device name=\"{target.Name}\" mac=\"{targetMac}\"");
+            Log($"[SDK] Connecting to discovered device name=\"{target.Name}\" mac=\"{targetMac}\"");
             Emit("DATA:STATUS message=\"Device found, connecting...\"");
 
             // IMPORTANT: Connect while the watcher is STILL RUNNING. Stopping the watcher
@@ -436,7 +483,7 @@ namespace MinttiCLI
             const int maxAttempts = 3;
             for (int attempt = 1; attempt <= maxAttempts && !connected; attempt++)
             {
-                Console.Error.WriteLine($"[SDK] connect attempt {attempt}/{maxAttempts}");
+                Log($"[SDK] connect attempt {attempt}/{maxAttempts}");
                 _connectResult = new TaskCompletionSource<bool>();
                 ble.ConnectByMac(targetMac);
 
@@ -446,7 +493,7 @@ namespace MinttiCLI
 
                 if (!connected && attempt < maxAttempts)
                 {
-                    Console.Error.WriteLine("[SDK] attempt failed, waiting before retry...");
+                    Log("[SDK] attempt failed, waiting before retry...");
                     await Task.Delay(2500); // let the BLE stack drop the stale connection
                 }
             }
@@ -480,6 +527,7 @@ namespace MinttiCLI
             await tcs.Task;
 
             _streaming = false;
+            Emit("DATA:STATUS message=\"Stopping and disconnecting...\"");
             ble.StopMeasure();
             ble.Dispose();
             PrintOk("stop");
