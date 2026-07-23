@@ -568,7 +568,34 @@ namespace MinttiCLI
 
             PrintOk("connect", $"mac={targetMac}");
 
+            // CRUCIAL: do NOT call StartMeasure() the instant CONNECTED fires. The SDK is
+            // still finishing GATT setup after that event (service discovery, characteristic
+            // enumeration, enabling notifications -- visible in -verbose as "Set notification
+            // successfully" / "Get service collected" arriving AFTER "Connected"). Issuing
+            // StartMeasure() mid-setup makes the device drop the link immediately. The vendor
+            // GUI never hits this because a human clicks "Start measuring" seconds later. We
+            // replicate that human pause here so the GATT pipeline is fully wired first.
+            //
+            // Reset the end signal so a stray event can't have pre-latched it, then make sure
+            // the link is still up after the settle before we start measuring. Set _streaming
+            // now (not after StartMeasure) so the MessageChanged handler will flag a drop that
+            // happens DURING the settle. No audio arrives until StartMeasure, so the data
+            // callback's _streaming guard is unaffected.
+            _streamEnded = new TaskCompletionSource<bool>();
             _streaming = true;
+            Emit("DATA:STATUS message=\"Preparing stream...\"");
+
+            var settle = await Task.WhenAny(_streamEnded.Task, Task.Delay(2500));
+            if (settle == _streamEnded.Task)
+            {
+                // Device dropped during the post-connect settle.
+                _streaming = false;
+                PrintError("CONNECT_FAILED",
+                    "Device " + targetMac + " disconnected before streaming could start.");
+                try { ble.Dispose(); } catch (Exception ex) { LogErr("Dispose failed: " + ex.Message); }
+                return 1;
+            }
+
             ble.StartMeasure();
             Emit("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
