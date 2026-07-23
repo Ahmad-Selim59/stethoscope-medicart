@@ -79,9 +79,21 @@ namespace MinttiCLI
             }
         }
 
+        // Shared state touched by the SDK event handlers.
+        private static readonly List<DeviceInfo> _devices = new List<DeviceInfo>();
+        private static readonly TaskCompletionSource<bool> _connectResult = new TaskCompletionSource<bool>();
+        private static bool _streaming;
+
         static async Task<int> RunAsync(string[] args)
         {
             var ble = MinttiBle.GetInstance;
+
+            // IMPORTANT: The Mintti SDK raises several of these events internally (some
+            // without null-checks). The GUI demo subscribes to ALL of them in its
+            // constructor before ever scanning/connecting. If any are left unsubscribed,
+            // the SDK throws a NullReferenceException (e.g. inside StartBleDeviceWatcher).
+            // So we wire up every event up front, exactly like the GUI does.
+            WireAllEvents(ble);
 
             if (args.Contains("-list"))
             {
@@ -102,6 +114,64 @@ namespace MinttiCLI
             PrintError("UNKNOWN_COMMAND", "Unknown command or missing arguments");
             PrintHelp();
             return 1;
+        }
+
+        static void WireAllEvents(MinttiBle ble)
+        {
+            // Device discovered during scanning.
+            ble.DeviceWatcherChanged += (device) =>
+            {
+                if (device == null || string.IsNullOrEmpty(device.Mac))
+                {
+                    return;
+                }
+                lock (_devices)
+                {
+                    if (!_devices.Any(d => d.Mac == device.Mac))
+                    {
+                        _devices.Add(device);
+                    }
+                }
+            };
+
+            // Connection status + general messages.
+            ble.MessageChanged += (type, message, data) =>
+            {
+                if (type == MsgType.ConnectStatus)
+                {
+                    if (message == MinttiConstants.CONNECTED)
+                    {
+                        _connectResult.TrySetResult(true);
+                    }
+                    else if (message == MinttiConstants.CONNECTION_FAILED || message == MinttiConstants.DISCONNECT)
+                    {
+                        _connectResult.TrySetResult(false);
+                    }
+                    Console.WriteLine($"DATA:STATUS type=connection message=\"{message}\"");
+                }
+            };
+
+            // Auscultation audio data.
+            ble.DataCallback += (data) =>
+            {
+                if (!_streaming) return;
+                string jsonData = JsonConvert.SerializeObject(data);
+                Console.WriteLine($"DATA:STREAM type=audio data={jsonData}");
+            };
+
+            // Heart rate.
+            ble.HeartRateCallback += (hr) =>
+            {
+                if (!_streaming) return;
+                Console.WriteLine($"DATA:STREAM type=heartrate value={hr}");
+            };
+
+            // The remaining events are not used by the CLI, but MUST be subscribed so the
+            // SDK never invokes a null delegate. No-op handlers are enough.
+            ble.PowerCallback += (power) => { };
+            ble.ModelSwitchback += (mode) => { };
+            ble.DataLoseCallback += () => { };
+            ble.PressTooBigCallback += () => { };
         }
 
         static void PrintHelp()
@@ -175,30 +245,21 @@ namespace MinttiCLI
                 return 1;
             }
 
-            List<DeviceInfo> devices = new List<DeviceInfo>();
-
-            ble.DeviceWatcherChanged += (device) =>
-            {
-                if (device == null || string.IsNullOrEmpty(device.Mac))
-                {
-                    return;
-                }
-
-                if (!devices.Any(d => d.Mac == device.Mac))
-                {
-                    devices.Add(device);
-                }
-            };
-
             ble.StartBleDeviceWatcher();
             Console.WriteLine("DATA:STATUS message=\"Scanning for 5 seconds...\"");
             await Task.Delay(5000);
             ble.StopBleDeviceWatcher();
 
-            Console.WriteLine($"DATA:LIST count={devices.Count}");
-            for (int i = 0; i < devices.Count; i++)
+            DeviceInfo[] found;
+            lock (_devices)
             {
-                Console.WriteLine($"DATA:ITEM index={i} name=\"{devices[i].Name}\" mac=\"{devices[i].Mac}\"");
+                found = _devices.ToArray();
+            }
+
+            Console.WriteLine($"DATA:LIST count={found.Length}");
+            for (int i = 0; i < found.Length; i++)
+            {
+                Console.WriteLine($"DATA:ITEM index={i} name=\"{found[i].Name}\" mac=\"{found[i].Mac}\"");
             }
             PrintOk("list");
             return 0;
@@ -211,41 +272,12 @@ namespace MinttiCLI
                 return 1;
             }
 
-            var connectResult = new TaskCompletionSource<bool>();
-
-            ble.MessageChanged += (type, message, data) =>
-            {
-                if (type == MsgType.ConnectStatus)
-                {
-                    if (message == MinttiConstants.CONNECTED)
-                    {
-                        connectResult.TrySetResult(true);
-                    }
-                    else if (message == MinttiConstants.CONNECTION_FAILED || message == MinttiConstants.DISCONNECT)
-                    {
-                        connectResult.TrySetResult(false);
-                    }
-                    Console.WriteLine($"DATA:STATUS type=connection message=\"{message}\"");
-                }
-            };
-
-            ble.DataCallback += (data) =>
-            {
-                string jsonData = JsonConvert.SerializeObject(data);
-                Console.WriteLine($"DATA:STREAM type=audio data={jsonData}");
-            };
-
-            ble.HeartRateCallback += (hr) =>
-            {
-                Console.WriteLine($"DATA:STREAM type=heartrate value={hr}");
-            };
-
             ble.ConnectByMac(mac);
 
             // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
             var timeout = Task.Delay(10000);
-            var finished = await Task.WhenAny(connectResult.Task, timeout);
-            bool connected = finished == connectResult.Task && connectResult.Task.Result;
+            var finished = await Task.WhenAny(_connectResult.Task, timeout);
+            bool connected = finished == _connectResult.Task && _connectResult.Task.Result;
 
             if (!connected)
             {
@@ -255,6 +287,7 @@ namespace MinttiCLI
 
             PrintOk("connect", $"mac={mac}");
 
+            _streaming = true;
             ble.StartMeasure();
             Console.WriteLine("DATA:STATUS message=\"Streaming started. Press Ctrl+C to stop.\"");
 
@@ -267,6 +300,7 @@ namespace MinttiCLI
 
             await tcs.Task;
 
+            _streaming = false;
             ble.StopMeasure();
             ble.Dispose();
             PrintOk("stop");
