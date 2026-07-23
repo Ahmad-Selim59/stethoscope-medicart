@@ -307,6 +307,11 @@ namespace MinttiCLI
             // Since -connect is a fresh process, we must scan first -- exactly like the GUI
             // (scan -> device appears -> select -> connect).
             Console.WriteLine("DATA:STATUS message=\"Scanning for target device...\"");
+
+            // Create a FRESH result BEFORE scanning so a real CONNECTED can resolve it, but
+            // reset again right before connecting so transient scan-phase messages can't
+            // pre-latch the outcome.
+            _connectResult = new TaskCompletionSource<bool>();
             ble.StartBleDeviceWatcher();
 
             DeviceInfo target = null;
@@ -324,10 +329,9 @@ namespace MinttiCLI
                 await Task.Delay(300);
             }
 
-            ble.StopBleDeviceWatcher();
-
             if (target == null)
             {
+                ble.StopBleDeviceWatcher();
                 PrintError("DEVICE_NOT_FOUND", "Device " + mac + " was not found during scan. Make sure it is powered on and in range.");
                 return 1;
             }
@@ -338,18 +342,20 @@ namespace MinttiCLI
             Console.Error.WriteLine($"[SDK] Connecting to discovered device name=\"{target.Name}\" mac=\"{targetMac}\"");
             Console.WriteLine("DATA:STATUS message=\"Device found, connecting...\"");
 
-            // Give the BLE stack a brief moment to settle after stopping the watcher.
-            await Task.Delay(500);
-
-            // Create a FRESH result here so any transient ConnectStatus message emitted
-            // during the scan/stop phase can't pre-latch our connection outcome.
+            // IMPORTANT: Connect while the watcher is STILL RUNNING. Stopping the watcher
+            // evicts the SDK's freshly-discovered device object, after which ConnectByMac
+            // has nothing to connect to and silently reports no status. So we connect first
+            // and only stop the watcher once the connection is established.
             _connectResult = new TaskCompletionSource<bool>();
             ble.ConnectByMac(targetMac);
 
             // Non-blocking wait so the STA message pump keeps delivering SDK callbacks.
-            var timeout = Task.Delay(25000);
+            var timeout = Task.Delay(20000);
             var finished = await Task.WhenAny(_connectResult.Task, timeout);
             bool connected = finished == _connectResult.Task && _connectResult.Task.Result;
+
+            // Now that we're connected (or gave up), stop scanning.
+            ble.StopBleDeviceWatcher();
 
             if (!connected)
             {
